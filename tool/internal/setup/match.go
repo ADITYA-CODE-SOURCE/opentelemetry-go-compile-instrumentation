@@ -61,6 +61,16 @@ func parseRuleFile(ctx context.Context, file string, content []byte, otelcVersio
 	return doc.Rules()
 }
 
+// setRuleMetadataPath ties rules loaded from an instrumentation module's
+// otelc.yaml to that module's metadata.yaml. This provenance applies to every
+// rule kind, including selectors with no hook path such as call and literal
+// rules.
+func setRuleMetadataPath(rules []rule.InstRule, metadataPath string) {
+	for _, r := range rules {
+		r.SetMetadataPath(metadataPath)
+	}
+}
+
 func matchVersion(dependency *Dependency, rule rule.InstRule) bool {
 	return util.VersionInRange(dependency.Version, rule.GetVersion())
 }
@@ -523,6 +533,7 @@ func loadRulesFromToolFiles(
 			if parseErr != nil {
 				return false, parseErr
 			}
+			setRuleMetadataPath(rules, filepath.Join(v.Config.ModuleDir, instrumentationMetadataFilename))
 
 			ruleSet = append(ruleSet, rules...)
 		}

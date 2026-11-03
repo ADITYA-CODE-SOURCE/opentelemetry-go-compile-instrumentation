@@ -21,11 +21,13 @@ import (
 // bound is exclusive. For example, "v1.0.0,v2.0.0" means the rule is applicable
 // to the target module version range [v1.0.0, v2.0.0).
 type InstRule interface {
-	String() string      // The string representation of the rule
-	GetName() string     // The unique name of the rule
-	GetTarget() *Target  // The packages the rule applies to
-	GetVersion() string  // The version range of target module if available, e.g "v1.0.0,v2.0.0"
-	GetWhere() *WhereDef // Optional non-package selectors that remain after normalization
+	String() string          // The string representation of the rule
+	GetName() string         // The unique name of the rule
+	GetTarget() *Target      // The packages the rule applies to
+	GetVersion() string      // The version range of target module if available, e.g "v1.0.0,v2.0.0"
+	GetWhere() *WhereDef     // Optional non-package selectors that remain after normalization
+	GetMetadataPath() string // Source instrumentation module's metadata.yaml, empty for external rules
+	SetMetadataPath(string)
 }
 
 // FilterDef describes file predicates nested under where.file.
@@ -70,18 +72,21 @@ type WhereDef struct {
 
 // InstBaseRule is the base rule for all instrumentation rules.
 type InstBaseRule struct {
-	Name    string            `json:"name,omitempty"    yaml:"name,omitempty"`
-	Target  Target            `json:"target"            yaml:"target"`
-	Version string            `json:"version,omitempty" yaml:"version,omitempty"`
-	Imports map[string]string `json:"imports,omitempty" yaml:"imports,omitempty"`
-	Where   *WhereDef         `json:"where,omitempty"   yaml:"where,omitempty"`
+	Name         string            `json:"name,omitempty"    yaml:"name,omitempty"`
+	Target       Target            `json:"target"            yaml:"target"`
+	Version      string            `json:"version,omitempty" yaml:"version,omitempty"`
+	Imports      map[string]string `json:"imports,omitempty" yaml:"imports,omitempty"`
+	Where        *WhereDef         `json:"where,omitempty"   yaml:"where,omitempty"`
+	metadataPath string
 }
 
-func (ibr *InstBaseRule) String() string      { return ibr.Name }
-func (ibr *InstBaseRule) GetName() string     { return ibr.Name }
-func (ibr *InstBaseRule) GetTarget() *Target  { return &ibr.Target }
-func (ibr *InstBaseRule) GetVersion() string  { return ibr.Version }
-func (ibr *InstBaseRule) GetWhere() *WhereDef { return ibr.Where }
+func (ibr *InstBaseRule) String() string              { return ibr.Name }
+func (ibr *InstBaseRule) GetName() string             { return ibr.Name }
+func (ibr *InstBaseRule) GetTarget() *Target          { return &ibr.Target }
+func (ibr *InstBaseRule) GetVersion() string          { return ibr.Version }
+func (ibr *InstBaseRule) GetWhere() *WhereDef         { return ibr.Where }
+func (ibr *InstBaseRule) GetMetadataPath() string     { return ibr.metadataPath }
+func (ibr *InstBaseRule) SetMetadataPath(path string) { ibr.metadataPath = path }
 
 // InstRuleSet represents a collection of instrumentation rules that apply to a
 // single Go package within a specific module. It acts as a container for rules,
@@ -106,6 +111,9 @@ type InstRuleSet struct {
 	// IsTest reports whether the set was matched against a test build of the
 	// package. A go test run can compile the same import path both ways.
 	IsTest bool `json:"is_test,omitempty"`
+	// configurationMetadataPaths records the metadata sources for rules that
+	// actually matched. It is setup-only and intentionally not serialized.
+	configurationMetadataPaths []string
 }
 
 func NewInstRuleSet(importPath string) *InstRuleSet {
@@ -160,30 +168,37 @@ func addRule[T InstRule](file string, rule T, rulesMap map[string][]T) {
 
 func (irs *InstRuleSet) AddRawRule(file string, rule *InstRawRule) {
 	addRule(file, rule, irs.RawRules)
+	irs.recordMetadataPath(rule)
 }
 
 func (irs *InstRuleSet) AddFuncRule(file string, rule *InstFuncRule) {
 	addRule(file, rule, irs.FuncRules)
+	irs.recordMetadataPath(rule)
 }
 
 func (irs *InstRuleSet) AddStructRule(file string, rule *InstStructRule) {
 	addRule(file, rule, irs.StructRules)
+	irs.recordMetadataPath(rule)
 }
 
 func (irs *InstRuleSet) AddCallRule(file string, rule *InstCallRule) {
 	addRule(file, rule, irs.CallRules)
+	irs.recordMetadataPath(rule)
 }
 
 func (irs *InstRuleSet) AddLitRule(file string, rule *InstLitRule) {
 	addRule(file, rule, irs.LitRules)
+	irs.recordMetadataPath(rule)
 }
 
 func (irs *InstRuleSet) AddDirectiveRule(file string, rule *InstDirectiveRule) {
 	addRule(file, rule, irs.DirectiveRules)
+	irs.recordMetadataPath(rule)
 }
 
 func (irs *InstRuleSet) AddDeclRule(file string, rule *InstDeclRule) {
 	addRule(file, rule, irs.DeclRules)
+	irs.recordMetadataPath(rule)
 }
 
 // AddIgnoredCallFile records that file holds a //otelc:ignore comment above
@@ -195,6 +210,20 @@ func (irs *InstRuleSet) AddIgnoredCallFile(file string) {
 
 func (irs *InstRuleSet) AddFileRule(rule *InstFileRule) {
 	irs.FileRules = append(irs.FileRules, rule)
+	irs.recordMetadataPath(rule)
+}
+
+func (irs *InstRuleSet) recordMetadataPath(r InstRule) {
+	if r == nil || r.GetMetadataPath() == "" || slices.Contains(irs.configurationMetadataPaths, r.GetMetadataPath()) {
+		return
+	}
+	irs.configurationMetadataPaths = append(irs.configurationMetadataPaths, r.GetMetadataPath())
+}
+
+// ConfigurationMetadataPaths returns the metadata files owning matched rules.
+// Paths are sorted to make validation order and diagnostics deterministic.
+func (irs *InstRuleSet) ConfigurationMetadataPaths() []string {
+	return slices.Clone(slices.Sorted(slices.Values(irs.configurationMetadataPaths)))
 }
 
 func (irs *InstRuleSet) SetPackageName(name string) {

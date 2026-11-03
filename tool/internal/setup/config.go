@@ -30,6 +30,7 @@ const (
 
 type instrumentationConfig struct {
 	ImportPath string
+	ModuleDir  string
 	ToolFile   string
 	RuleFiles  []string
 	Error      error
@@ -259,6 +260,7 @@ func walkInstrumentation(ctx context.Context, toolFiles []string, visit instrume
 // its error. modDir and pkgDir are the module and the package directories of
 // pkg.
 func fillInstrumentationConfig(cfg *instrumentationConfig, pkg *packages.Package, modDir, pkgDir string) {
+	cfg.ModuleDir = modDir
 	// Always look for tool file in the module directory
 	toolFile, findErr := findToolFile(modDir)
 	if findErr != nil {

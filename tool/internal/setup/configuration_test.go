@@ -5,6 +5,7 @@ package setup
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -25,7 +26,48 @@ func TestValidateSelectedConfigurationMetadata(t *testing.T) {
 
 	err := sp.validateSelectedConfigurationMetadata(matched)
 	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(module.dir, "hooks"), matched[0].AllFuncRules()[0].ResolvedPath)
+}
+
+func TestConfigurationMetadataTracksEveryMatchedRuleType(t *testing.T) {
+	metadataPath := filepath.Join(t.TempDir(), "metadata.yaml")
+	set := rule.NewInstRuleSet("example.com/app")
+	raw := &rule.InstRawRule{}
+	function := &rule.InstFuncRule{}
+	structure := &rule.InstStructRule{}
+	call := &rule.InstCallRule{}
+	literal := &rule.InstLitRule{}
+	directive := &rule.InstDirectiveRule{}
+	declaration := &rule.InstDeclRule{}
+	file := &rule.InstFileRule{}
+	rules := []rule.InstRule{
+		raw, function, structure, call, literal, directive, declaration, file,
+	}
+	setRuleMetadataPath(rules, metadataPath)
+	set.AddRawRule("/app.go", raw)
+	set.AddFuncRule("/app.go", function)
+	set.AddStructRule("/app.go", structure)
+	set.AddCallRule("/app.go", call)
+	set.AddLitRule("/app.go", literal)
+	set.AddDirectiveRule("/app.go", directive)
+	set.AddDeclRule("/app.go", declaration)
+	set.AddFileRule(file)
+
+	assert.Equal(t, []string{metadataPath}, set.ConfigurationMetadataPaths())
+}
+
+func TestValidateSelectedConfigurationMetadataForCallOnlyInstrumentation(t *testing.T) {
+	module := makeConfigurationModule(t, "example.com/callonly", `configurations:
+  - ref: missing.definition
+`)
+	set := rule.NewInstRuleSet("example.com/app")
+	set.AddCallRule("/app.go", &rule.InstCallRule{InstBaseRule: metadataSource(
+		filepath.Join(module.dir, instrumentationMetadataFilename),
+	)})
+
+	err := newTestSetupPhase().validateSelectedConfigurationMetadata([]*rule.InstRuleSet{set})
+
+	require.ErrorContains(t, err, `unknown configuration ref "missing.definition"`)
+	require.ErrorContains(t, err, filepath.Join(module.dir, instrumentationMetadataFilename))
 }
 
 func TestValidateSelectedConfigurationMetadataUnknownReference(t *testing.T) {
@@ -45,7 +87,11 @@ func TestValidateSelectedConfigurationMetadataSkipsUnselectedModules(t *testing.
   - ref: missing.definition
 `)
 	matched := matchedConfigurationRules(selected)
-	assert.NotContains(t, selectedHookPackageDirs(matched), filepath.Join(unselected.dir, "hooks"))
+	assert.NotContains(
+		t,
+		matched[0].ConfigurationMetadataPaths(),
+		filepath.Join(unselected.dir, instrumentationMetadataFilename),
+	)
 
 	err := newTestSetupPhase().validateSelectedConfigurationMetadata(matched)
 	require.NoError(t, err)
@@ -79,46 +125,16 @@ func TestValidateSelectedConfigurationMetadataWithNoMatchedHooks(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestModuleRootForPackage(t *testing.T) {
-	moduleDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(moduleDir, "go.mod"), []byte("module example.com/test\n"), 0o644))
-	packageDir := filepath.Join(moduleDir, "nested", "hooks")
-	require.NoError(t, os.MkdirAll(packageDir, 0o755))
+func TestConfigurationMetadataPathsAreSetupOnly(t *testing.T) {
+	set := rule.NewInstRuleSet("example.com/app")
+	var base rule.InstBaseRule
+	base.SetMetadataPath("/module/metadata.yaml")
+	r := &rule.InstCallRule{InstBaseRule: base}
+	set.AddCallRule("/app.go", r)
 
-	got, err := moduleRootForPackage(packageDir)
-
+	encoded, err := json.Marshal(set)
 	require.NoError(t, err)
-	assert.Equal(t, moduleDir, got)
-
-	withoutModuleDir := t.TempDir()
-	withoutModulePackage := filepath.Join(withoutModuleDir, "nested", "hooks")
-	require.NoError(t, os.MkdirAll(withoutModulePackage, 0o755))
-	_, err = moduleRootForPackage(withoutModulePackage)
-	require.ErrorContains(t, err, "no parent go.mod found")
-
-	notDirectory := filepath.Join(t.TempDir(), "file")
-	require.NoError(t, os.WriteFile(notDirectory, []byte("not a directory"), 0o644))
-	_, err = moduleRootForPackage(filepath.Join(notDirectory, "nested"))
-	require.Error(t, err)
-}
-
-func TestSelectedHookPackageDirsDeduplicatesAndSorts(t *testing.T) {
-	matched := []*rule.InstRuleSet{
-		nil,
-		{
-			FileRules: []*rule.InstFileRule{{ResolvedPath: "/z/hooks"}, {ResolvedPath: "/a/hooks"}},
-			FuncRules: map[string][]*rule.InstFuncRule{
-				"http.go": {{ResolvedPath: "/z/hooks"}, {ResolvedPath: ""}},
-			},
-		},
-		{
-			FuncRules: map[string][]*rule.InstFuncRule{
-				"client.go": {{ResolvedPath: "/m/hooks"}},
-			},
-		},
-	}
-
-	assert.Equal(t, []string{"/a/hooks", "/m/hooks", "/z/hooks"}, selectedHookPackageDirs(matched))
+	assert.NotContains(t, string(encoded), "metadata.yaml")
 }
 
 func TestWarnIfNoInstrumentationMatched(t *testing.T) {
@@ -136,14 +152,12 @@ type configurationTestModule struct {
 }
 
 func matchedConfigurationRules(module configurationTestModule) []*rule.InstRuleSet {
-	return []*rule.InstRuleSet{{
-		FuncRules: map[string][]*rule.InstFuncRule{
-			"http.go": {{
-				Path:         module.hookPath,
-				ResolvedPath: filepath.Join(module.dir, "hooks"),
-			}},
-		},
-	}}
+	set := rule.NewInstRuleSet("example.com/app")
+	set.AddFuncRule(filepath.Join(module.dir, "http.go"), &rule.InstFuncRule{
+		InstBaseRule: metadataSource(filepath.Join(module.dir, instrumentationMetadataFilename)),
+		Path:         module.hookPath,
+	})
+	return []*rule.InstRuleSet{set}
 }
 
 func makeConfigurationModule(t *testing.T, modulePath, metadata string) configurationTestModule {
@@ -198,59 +212,34 @@ func makeVendoredHook(t *testing.T, appMetadata, hookMetadata string) vendoredHo
 	return vendoredHook{appDir: appDir, hookDir: hookDir}
 }
 
-func TestModuleRootForPackageInVendorDir(t *testing.T) {
-	app := makeVendoredHook(t, "", "")
-	appDir, hookDir := app.appDir, app.hookDir
-
-	got, err := moduleRootForPackage(hookDir)
-
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(appDir, "vendor", "example.com", "hooks"), got)
-
-	// A nested module without packages (an explicit block with no package) is
-	// not the owner of a package whose path starts with its path: the module
-	// that lists the package is.
-	modulesTxt := "# example.com/hooks v1.0.0\n## explicit; go 1.21\nexample.com/hooks/hooks\n" +
-		"# example.com/hooks/hooks v1.0.0\n## explicit; go 1.21\n"
-	require.NoError(t, os.WriteFile(filepath.Join(appDir, "vendor", "modules.txt"), []byte(modulesTxt), 0o644))
-	got, err = moduleRootForPackage(hookDir)
-	require.NoError(t, err)
-	assert.Equal(t, filepath.Join(appDir, "vendor", "example.com", "hooks"), got)
-
-	// A package that no module of vendor/modules.txt owns is an error, rather
-	// than a silent fall back to the module of the application.
-	orphan := filepath.Join(appDir, "vendor", "example.com", "other", "pkg")
-	require.NoError(t, os.MkdirAll(orphan, 0o755))
-	_, err = moduleRootForPackage(orphan)
-	require.ErrorContains(t, err, "no module of vendor/modules.txt owns package")
-
-	require.NoError(t, os.Remove(filepath.Join(appDir, "vendor", "modules.txt")))
-	_, err = moduleRootForPackage(hookDir)
-	require.ErrorContains(t, err, "vendor/modules.txt")
-}
-
 func TestValidateSelectedConfigurationMetadataVendoredHookIgnoresApplicationMetadata(t *testing.T) {
 	// The metadata.yaml of the application is not an otelc metadata file, and
 	// must not be read in place of the one of the hook module.
 	hookDir := makeVendoredHook(t, "configurations: {}\n", "").hookDir
-	matched := []*rule.InstRuleSet{{
-		FuncRules: map[string][]*rule.InstFuncRule{
-			"http.go": {{Path: "example.com/hooks/hooks", ResolvedPath: hookDir}},
-		},
-	}}
+	set := rule.NewInstRuleSet("example.com/app")
+	set.AddFuncRule(filepath.Join(hookDir, "hooks.go"), &rule.InstFuncRule{
+		Path:         "example.com/hooks/hooks",
+		InstBaseRule: metadataSource(filepath.Join(filepath.Dir(hookDir), instrumentationMetadataFilename)),
+	})
 
-	require.NoError(t, newTestSetupPhase().validateSelectedConfigurationMetadata(matched))
+	require.NoError(t, newTestSetupPhase().validateSelectedConfigurationMetadata([]*rule.InstRuleSet{set}))
 }
 
 func TestValidateSelectedConfigurationMetadataVendoredHookReadsModuleMetadata(t *testing.T) {
 	hookDir := makeVendoredHook(t, "", "configurations:\n  - ref: missing.definition\n").hookDir
-	matched := []*rule.InstRuleSet{{
-		FuncRules: map[string][]*rule.InstFuncRule{
-			"http.go": {{Path: "example.com/hooks/hooks", ResolvedPath: hookDir}},
-		},
-	}}
+	set := rule.NewInstRuleSet("example.com/app")
+	set.AddFuncRule(filepath.Join(hookDir, "hooks.go"), &rule.InstFuncRule{
+		Path:         "example.com/hooks/hooks",
+		InstBaseRule: metadataSource(filepath.Join(filepath.Dir(hookDir), instrumentationMetadataFilename)),
+	})
 
-	err := newTestSetupPhase().validateSelectedConfigurationMetadata(matched)
+	err := newTestSetupPhase().validateSelectedConfigurationMetadata([]*rule.InstRuleSet{set})
 
 	require.ErrorContains(t, err, `unknown configuration ref "missing.definition"`)
+}
+
+func metadataSource(path string) rule.InstBaseRule {
+	var base rule.InstBaseRule
+	base.SetMetadataPath(path)
+	return base
 }
