@@ -334,6 +334,11 @@ func TestFileRules_Order(t *testing.T) {
 			wantErr: "order must be set on a do modifier",
 		},
 		{
+			name:    "legacy flat form",
+			content: "rule:\n  target: main\n  func: main\n  before: Before\n  path: example.com/hooks\n  order: 1\n",
+			wantErr: "order must be set on a do modifier",
+		},
+		{
 			name:    "string",
 			content: "rule:\n  target: main\n  where:\n    func: main\n  do:\n    - inject_code:\n        raw: _ = 0\n        order: high\n",
 			wantErr: "order must be an integer, got high",

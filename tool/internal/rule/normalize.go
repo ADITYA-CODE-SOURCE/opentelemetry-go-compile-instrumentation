@@ -54,6 +54,9 @@ func Normalize(fields map[string]any) ([]map[string]any, error) {
 	_, hasWhere := fields[keyWhere]
 	_, hasDo := fields[keyDo]
 	if !hasWhere && !hasDo {
+		if _, hasOrder := fields[orderField]; hasOrder {
+			return nil, ex.Newf("order must be set on a do modifier, not at the top level of the rule")
+		}
 		return []map[string]any{fields}, nil
 	}
 	if !hasDo {

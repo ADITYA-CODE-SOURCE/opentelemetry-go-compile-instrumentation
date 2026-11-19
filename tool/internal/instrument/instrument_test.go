@@ -747,6 +747,29 @@ func TestGroupRules(t *testing.T) {
 				}, names)
 			},
 		},
+		{
+			name: "rules mapped to one cgo file are sorted by source file",
+			ruleSet: &rule.InstRuleSet{
+				FuncRules:   make(map[string][]*rule.InstFuncRule),
+				StructRules: make(map[string][]*rule.InstStructRule),
+				RawRules: map[string][]*rule.InstRawRule{
+					"b.go": {{InstBaseRule: rule.InstBaseRule{Name: "raw_b"}}},
+					"a.go": {{InstBaseRule: rule.InstBaseRule{Name: "raw_a"}}},
+				},
+				CgoFileMap: map[string]string{
+					"a.go": "combined.go",
+					"b.go": "combined.go",
+				},
+			},
+			expectedFiles: []string{"combined.go"},
+			validate: func(t *testing.T, grouped map[string][]rule.InstRule) {
+				names := make([]string, 0, len(grouped["combined.go"]))
+				for _, r := range grouped["combined.go"] {
+					names = append(names, r.GetName())
+				}
+				assert.Equal(t, []string{"raw_a", "raw_b"}, names)
+			},
+		},
 	}
 
 	for _, tt := range tests {
